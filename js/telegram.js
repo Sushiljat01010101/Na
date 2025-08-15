@@ -18,31 +18,17 @@ class TelegramHandler {
     }
     
     getBotToken() {
-        // Get bot token from window configuration first, then environment
-        const token = window.TELEGRAM_BOT_TOKEN || 
-                     this.getEnvVariable('TELEGRAM_BOT_TOKEN') || 
-                     this.getEnvVariable('BOT_TOKEN');
-        
-        if (!token || token.length < 20) {
-            console.warn('Invalid Telegram Bot Token. Please configure TELEGRAM_BOT_TOKEN.');
-            return null;
-        }
-        
-        return token;
+        // Get bot token from server-side environment variables only
+        // Frontend should not have direct access to bot token for security
+        console.warn('Bot token should be handled server-side only for security');
+        return null;
     }
     
     getChatId() {
-        // Get chat ID from window configuration first, then environment
-        const chatId = window.TELEGRAM_CHAT_ID || 
-                      this.getEnvVariable('TELEGRAM_CHAT_ID') || 
-                      this.getEnvVariable('CHAT_ID');
-        
-        if (!chatId) {
-            console.warn('Invalid Telegram Chat ID. Please configure TELEGRAM_CHAT_ID.');
-            return null;
-        }
-        
-        return chatId;
+        // Get chat ID from server-side environment variables only  
+        // Frontend should not have direct access to chat ID for security
+        console.warn('Chat ID should be handled server-side only for security');
+        return null;
     }
     
     getEnvVariable(name) {
