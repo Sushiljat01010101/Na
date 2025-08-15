@@ -10,6 +10,7 @@ from reportlab.lib.utils import ImageReader
 from PIL import Image
 import json
 from datetime import datetime
+from notion_client import Client
 
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
@@ -17,34 +18,307 @@ CORS(app)
 # For Vercel deployment
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
 
-# Telegram configuration - Use environment variables for production
+# Telegram configuration - Use environment variables only for security
 import os
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '7693479991:AAF00-TVlY6tGmPbCcc9kvGNlNwm1yvQXZI')
-TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID', '1691680798')
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+
+# Notion configuration
+NOTION_INTEGRATION_SECRET = os.getenv('NOTION_INTEGRATION_SECRET')
+NOTION_DATABASE_ID = os.getenv('NOTION_DATABASE_ID')
+
+# Global variable to store the actual database ID once created
+ACTUAL_DATABASE_ID = None
+DATABASE_ID_FILE = 'notion_database_id.txt'
+
+def load_stored_database_id():
+    """Load database ID from file if it exists"""
+    global ACTUAL_DATABASE_ID
+    try:
+        if os.path.exists(DATABASE_ID_FILE):
+            with open(DATABASE_ID_FILE, 'r') as f:
+                stored_id = f.read().strip()
+                if stored_id and notion_client:
+                    # Verify the stored ID still works
+                    notion_client.databases.retrieve(database_id=stored_id)
+                    ACTUAL_DATABASE_ID = stored_id
+                    print(f"Loaded existing database ID: {stored_id[:8]}...")
+                    return True
+    except Exception as e:
+        print(f"Failed to load stored database ID: {e}")
+        # Remove invalid file
+        if os.path.exists(DATABASE_ID_FILE):
+            os.remove(DATABASE_ID_FILE)
+    return False
+
+def save_database_id(database_id):
+    """Save database ID to file"""
+    try:
+        with open(DATABASE_ID_FILE, 'w') as f:
+            f.write(database_id)
+        print(f"Saved database ID: {database_id[:8]}...")
+    except Exception as e:
+        print(f"Failed to save database ID: {e}")
+
+# Initialize Notion client
+notion_client = None
+if NOTION_INTEGRATION_SECRET:
+    try:
+        notion_client = Client(auth=NOTION_INTEGRATION_SECRET)
+        print("Notion client initialized successfully")
+        # Try to load existing database ID
+        if load_stored_database_id():
+            print("Using existing database")
+        else:
+            print("No existing database found, will create on first use")
+    except Exception as e:
+        print(f"Failed to initialize Notion client: {e}")
+else:
+    print("Notion integration secret not found")
 
 def send_telegram_message(message):
     """Send a text message to Telegram"""
-    url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
-    data = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'text': message,
-        'parse_mode': 'HTML'
-    }
-    response = requests.post(url, data=data)
-    return response.json()
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise ValueError("Telegram credentials not configured. Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.")
+    
+    try:
+        url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage'
+        data = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'text': message,
+            'parse_mode': 'HTML'
+        }
+        response = requests.post(url, data=data, timeout=30)
+        return response.json()
+    except Exception as e:
+        print(f"Error sending Telegram message: {e}")
+        raise
 
 def send_telegram_document(file_data, filename, caption=''):
     """Send a PDF document to Telegram"""
-    url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument'
-    files = {
-        'document': (filename, file_data, 'application/pdf')
-    }
-    data = {
-        'chat_id': TELEGRAM_CHAT_ID,
-        'caption': caption
-    }
-    response = requests.post(url, files=files, data=data)
-    return response.json()
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        raise ValueError("Telegram credentials not configured. Please set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID environment variables.")
+    
+    try:
+        url = f'https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument'
+        files = {
+            'document': (filename, file_data, 'application/pdf')
+        }
+        data = {
+            'chat_id': TELEGRAM_CHAT_ID,
+            'caption': caption
+        }
+        response = requests.post(url, files=files, data=data, timeout=30)
+        return response.json()
+    except Exception as e:
+        print(f"Error sending Telegram document: {e}")
+        raise
+
+def create_notion_database():
+    """Create a Notion database for hostel admissions"""
+    if not notion_client:
+        return {'success': False, 'error': 'Notion client not initialized'}
+    
+    try:
+        # Create database properties
+        properties = {
+            "Student Name": {"title": {}},
+            "Application ID": {"rich_text": {}},
+            "Email": {"email": {}},
+            "Phone": {"phone_number": {}},
+            "Date of Birth": {"date": {}},
+            "Gender": {
+                "select": {
+                    "options": [
+                        {"name": "Male", "color": "blue"},
+                        {"name": "Female", "color": "pink"},
+                        {"name": "Other", "color": "gray"}
+                    ]
+                }
+            },
+            "Address": {"rich_text": {}},
+            "Guardian Name": {"rich_text": {}},
+            "Guardian Phone": {"phone_number": {}},
+            "Relation": {
+                "select": {
+                    "options": [
+                        {"name": "Father", "color": "blue"},
+                        {"name": "Mother", "color": "pink"},
+                        {"name": "Guardian", "color": "green"},
+                        {"name": "Other", "color": "gray"}
+                    ]
+                }
+            },
+            "Room Number": {"rich_text": {}},
+            "Admission Date": {"date": {}},
+            "Stay Duration": {"rich_text": {}},
+            "Emergency Contact": {"phone_number": {}},
+            "Status": {
+                "select": {
+                    "options": [
+                        {"name": "Pending Review", "color": "yellow"},
+                        {"name": "Approved", "color": "green"},
+                        {"name": "Rejected", "color": "red"}
+                    ]
+                }
+            },
+            "Submission Date": {"date": {}}
+        }
+        
+        # Create database
+        database = notion_client.databases.create(
+            parent={"type": "page_id", "page_id": NOTION_DATABASE_ID},
+            title=[
+                {
+                    "type": "text",
+                    "text": {
+                        "content": "Hostel Admission Applications"
+                    }
+                }
+            ],
+            properties=properties
+        )
+        
+        return {
+            'success': True,
+            'database_id': database['id'],
+            'message': 'Database created successfully!'
+        }
+        
+    except Exception as e:
+        return {'success': False, 'error': str(e)}
+
+def get_or_create_database():
+    """Get existing database ID or create new one if needed"""
+    global ACTUAL_DATABASE_ID
+    
+    # If we already have a working database ID, use it
+    if ACTUAL_DATABASE_ID:
+        try:
+            notion_client.databases.retrieve(database_id=ACTUAL_DATABASE_ID)
+            return {'success': True, 'database_id': ACTUAL_DATABASE_ID}
+        except:
+            # If stored ID doesn't work, reset it
+            ACTUAL_DATABASE_ID = None
+            if os.path.exists(DATABASE_ID_FILE):
+                os.remove(DATABASE_ID_FILE)
+    
+    # Try to use the provided ID as database first
+    try:
+        notion_client.databases.retrieve(database_id=NOTION_DATABASE_ID)
+        ACTUAL_DATABASE_ID = NOTION_DATABASE_ID
+        save_database_id(ACTUAL_DATABASE_ID)
+        return {'success': True, 'database_id': NOTION_DATABASE_ID}
+    except Exception as db_error:
+        # If it's not a database, create one using the page ID
+        if "is a page, not a database" in str(db_error):
+            print("Creating database in the provided page...")
+            create_result = create_notion_database()
+            if create_result['success']:
+                ACTUAL_DATABASE_ID = create_result['database_id']
+                save_database_id(ACTUAL_DATABASE_ID)
+                print(f"Database created with ID: {ACTUAL_DATABASE_ID}")
+                return {'success': True, 'database_id': ACTUAL_DATABASE_ID}
+            else:
+                return {'success': False, 'error': f'Failed to create database: {create_result["error"]}'}
+        else:
+            return {'success': False, 'error': str(db_error)}
+
+def save_to_notion_database(form_data):
+    """Save form data to Notion database"""
+    if not notion_client or not NOTION_DATABASE_ID:
+        return {'success': False, 'error': 'Notion not configured'}
+    
+    try:
+        # Generate application ID
+        app_id = f"HA-{datetime.now().strftime('%Y%m%d%H%M%S')}"
+        
+        # Get or create the database
+        db_result = get_or_create_database()
+        if not db_result['success']:
+            return db_result
+        
+        database_id = db_result['database_id']
+        
+        # Prepare properties for Notion page
+        properties = {
+            "Student Name": {
+                "title": [
+                    {
+                        "text": {
+                            "content": form_data.get('fullName', 'N/A')
+                        }
+                    }
+                ]
+            },
+            "Application ID": {
+                "rich_text": [
+                    {
+                        "text": {
+                            "content": app_id
+                        }
+                    }
+                ]
+            }
+        }
+        
+        # Add other properties safely
+        if form_data.get('email'):
+            properties["Email"] = {"email": form_data.get('email')}
+        
+        if form_data.get('phone'):
+            properties["Phone"] = {"phone_number": form_data.get('phone')}
+        
+        if form_data.get('dateOfBirth'):
+            properties["Date of Birth"] = {"date": {"start": form_data.get('dateOfBirth')}}
+        
+        if form_data.get('gender'):
+            properties["Gender"] = {"select": {"name": form_data.get('gender').title()}}
+        
+        if form_data.get('address'):
+            properties["Address"] = {"rich_text": [{"text": {"content": form_data.get('address')}}]}
+        
+        if form_data.get('guardianName'):
+            properties["Guardian Name"] = {"rich_text": [{"text": {"content": form_data.get('guardianName')}}]}
+        
+        if form_data.get('guardianPhone'):
+            properties["Guardian Phone"] = {"phone_number": form_data.get('guardianPhone')}
+        
+        if form_data.get('relation'):
+            properties["Relation"] = {"select": {"name": form_data.get('relation').title()}}
+        
+        if form_data.get('roomNumber'):
+            properties["Room Number"] = {"rich_text": [{"text": {"content": form_data.get('roomNumber')}}]}
+        
+        if form_data.get('admissionDate'):
+            properties["Admission Date"] = {"date": {"start": form_data.get('admissionDate')}}
+        
+        if form_data.get('stayDuration'):
+            properties["Stay Duration"] = {"rich_text": [{"text": {"content": form_data.get('stayDuration')}}]}
+        
+        if form_data.get('emergencyContact'):
+            properties["Emergency Contact"] = {"phone_number": form_data.get('emergencyContact')}
+        
+        # Always add status and submission date
+        properties["Status"] = {"select": {"name": "Pending Review"}}
+        properties["Submission Date"] = {"date": {"start": datetime.now().isoformat()}}
+        
+        # Create page in Notion database
+        result = notion_client.pages.create(
+            parent={"database_id": database_id},
+            properties=properties
+        )
+        
+        return {
+            'success': True, 
+            'notion_page_id': result['id'],
+            'application_id': app_id,
+            'database_id': database_id
+        }
+        
+    except Exception as e:
+        print(f"Error saving to Notion: {e}")
+        return {'success': False, 'error': str(e)}
 
 def generate_pdf(form_data):
     """Generate PDF from form data"""
@@ -437,6 +711,17 @@ def submit_application():
         if not form_data:
             return jsonify({'success': False, 'error': 'No data provided'}), 400
         
+        # Initialize response data
+        response_data = {'success': True, 'message': 'Application submitted successfully!'}
+        
+        # Save to Notion database first
+        notion_result = save_to_notion_database(form_data)
+        if notion_result['success']:
+            response_data['notion_page_id'] = notion_result['notion_page_id']
+            response_data['application_id'] = notion_result['application_id']
+        else:
+            response_data['notion_warning'] = f'Notion save failed: {notion_result["error"]}'
+        
         # Generate PDF
         pdf_data = generate_pdf(form_data)
         
@@ -445,34 +730,610 @@ def submit_application():
         filename = f"NavadayaGirlsHostal_Application_{student_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
         
         # Create caption for Telegram
+        app_id = notion_result.get('application_id', f"HA-{datetime.now().strftime('%Y%m%d%H%M%S')}")
         caption = f"""🏠 <b>New Hostel Admission Application</b>
         
-👤 Student:{form_data.get('fullName', 'N/A')}
+👤 <b>Student:</b> {form_data.get('fullName', 'N/A')}
 📧 <b>Email:</b> {form_data.get('email', 'N/A')}
 📱 <b>Phone:</b> {form_data.get('phone', 'N/A')}
 🏠 <b>Room:</b> {form_data.get('roomNumber', 'N/A')}
 📅 <b>Admission Date:</b> {form_data.get('admissionDate', 'N/A')}
 ⏰ <b>Duration:</b> {form_data.get('stayDuration', 'N/A')}
+🆔 <b>Application ID:</b> {app_id}
 
 📋 Complete application form attached as PDF."""
         
         # Send to Telegram
-        result = send_telegram_document(pdf_data, filename, caption)
+        telegram_result = send_telegram_document(pdf_data, filename, caption)
         
-        if result.get('ok'):
-            return jsonify({
-                'success': True, 
-                'message': 'Application submitted successfully!',
-                'telegram_message_id': result.get('result', {}).get('message_id')
-            })
+        if telegram_result.get('ok'):
+            response_data['telegram_message_id'] = telegram_result.get('result', {}).get('message_id')
         else:
+            response_data['telegram_warning'] = f'Telegram send failed: {telegram_result.get("description", "Unknown error")}'
+        
+        # If both Notion and Telegram failed, return error
+        if not notion_result['success'] and not telegram_result.get('ok'):
             return jsonify({
                 'success': False, 
-                'error': f'Failed to send to Telegram: {result.get("description", "Unknown error")}'
+                'error': 'Failed to submit to both Notion and Telegram',
+                'notion_error': notion_result['error'],
+                'telegram_error': telegram_result.get('description', 'Unknown error')
             }), 500
+        
+        return jsonify(response_data)
             
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/notion-test', methods=['GET'])
+def test_notion_connection():
+    """Test endpoint to check Notion connection"""
+    if not notion_client or not NOTION_DATABASE_ID:
+        return jsonify({
+            'success': False, 
+            'error': 'Notion not configured',
+            'has_secret': bool(NOTION_INTEGRATION_SECRET),
+            'has_database_id': bool(NOTION_DATABASE_ID)
+        })
+    
+    try:
+        # Try to retrieve database info first
+        try:
+            database = notion_client.databases.retrieve(database_id=NOTION_DATABASE_ID)
+            return jsonify({
+                'success': True,
+                'type': 'database',
+                'database_title': database.get('title', [{}])[0].get('text', {}).get('content', 'Unknown'),
+                'database_id': NOTION_DATABASE_ID[:8] + '...',
+                'message': 'Notion database connection successful!'
+            })
+        except Exception as db_error:
+            # If it's not a database, check if it's a page
+            if "is a page, not a database" in str(db_error):
+                page = notion_client.pages.retrieve(page_id=NOTION_DATABASE_ID)
+                return jsonify({
+                    'success': True,
+                    'type': 'page',
+                    'page_title': page.get('properties', {}).get('title', {}).get('title', [{}])[0].get('text', {}).get('content', 'Unknown'),
+                    'page_id': NOTION_DATABASE_ID[:8] + '...',
+                    'message': 'Notion page found! Database will be created automatically when first form is submitted.',
+                    'note': 'This is a page, not a database. The system will create a database automatically.'
+                })
+            else:
+                raise db_error
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Notion connection failed: {str(e)}'
+        })
+
+@app.route('/create-notion-database', methods=['POST'])
+def create_database_endpoint():
+    """Endpoint to manually create the Notion database"""
+    global ACTUAL_DATABASE_ID
+    if not notion_client or not NOTION_DATABASE_ID:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    # Check if we already have a working database
+    if ACTUAL_DATABASE_ID:
+        try:
+            database = notion_client.databases.retrieve(database_id=ACTUAL_DATABASE_ID)
+            return jsonify({
+                'success': True,
+                'database_id': ACTUAL_DATABASE_ID,
+                'message': 'Database already exists!',
+                'existing': True
+            })
+        except:
+            ACTUAL_DATABASE_ID = None
+    
+    result = create_notion_database()
+    if result['success']:
+        ACTUAL_DATABASE_ID = result['database_id']
+        save_database_id(ACTUAL_DATABASE_ID)
+    return jsonify(result)
+
+@app.route('/get-database-info', methods=['GET'])
+def get_database_info():
+    """Get current database information"""
+    global ACTUAL_DATABASE_ID
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    db_result = get_or_create_database()
+    if db_result['success']:
+        try:
+            database = notion_client.databases.retrieve(database_id=db_result['database_id'])
+            return jsonify({
+                'success': True,
+                'database_id': db_result['database_id'][:8] + '...',
+                'database_title': database.get('title', [{}])[0].get('text', {}).get('content', 'Unknown'),
+                'actual_id_stored': bool(ACTUAL_DATABASE_ID),
+                'message': 'Database is ready for submissions!'
+            })
+        except Exception as e:
+            return jsonify({'success': False, 'error': str(e)})
+    else:
+        return jsonify(db_result)
+
+@app.route('/admin')
+def admin_panel():
+    """Serve the admin panel"""
+    return send_file('admin.html')
+
+@app.route('/api/admin/applications', methods=['GET'])
+def get_admin_applications():
+    """Get all applications for admin panel"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        db_result = get_or_create_database()
+        if not db_result['success']:
+            return jsonify(db_result)
+        
+        database_id = db_result['database_id']
+        
+        # Query all pages from database
+        response = notion_client.databases.query(
+            database_id=database_id,
+            sorts=[
+                {
+                    "property": "Submission Date",
+                    "direction": "descending"
+                }
+            ]
+        )
+        
+        applications = []
+        for page in response['results']:
+            try:
+                props = page['properties']
+                
+                # Extract data safely
+                app_data = {
+                    'id': page['id'],
+                    'student_name': get_notion_text(props.get('Student Name', {})),
+                    'email': get_notion_email(props.get('Email', {})),
+                    'phone': get_notion_phone(props.get('Phone', {})),
+                    'date_of_birth': get_notion_date(props.get('Date of Birth', {})),
+                    'address': get_notion_text(props.get('Address', {})),
+                    'guardian_name': get_notion_text(props.get('Guardian Name', {})),
+                    'guardian_phone': get_notion_phone(props.get('Guardian Phone', {})),
+                    'relation': get_notion_select(props.get('Relation', {})),
+                    'room_number': get_notion_text(props.get('Room Number', {})),
+                    'admission_date': get_notion_date(props.get('Admission Date', {})),
+                    'stay_duration': get_notion_text(props.get('Stay Duration', {})),
+                    'emergency_contact': get_notion_phone(props.get('Emergency Contact', {})),
+                    'status': get_notion_select(props.get('Status', {})) or 'Pending Review',
+                    'submission_date': get_notion_date(props.get('Submission Date', {})),
+                    'application_id': get_notion_text(props.get('Application ID', {}))
+                }
+                applications.append(app_data)
+            except Exception as e:
+                print(f"Error processing application: {e}")
+                continue
+        
+        return jsonify({
+            'success': True,
+            'applications': applications,
+            'total': len(applications)
+        })
+        
+    except Exception as e:
+        print(f"Error fetching applications: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/admin/applications/<application_id>/status', methods=['PATCH'])
+def update_application_status(application_id):
+    """Update application status"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        data = request.get_json()
+        new_status = data.get('status')
+        
+        if not new_status:
+            return jsonify({'success': False, 'error': 'Status is required'}), 400
+        
+        # Update the page in Notion
+        notion_client.pages.update(
+            page_id=application_id,
+            properties={
+                "Status": {
+                    "select": {
+                        "name": new_status
+                    }
+                }
+            }
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': f'Application status updated to {new_status}'
+        })
+        
+    except Exception as e:
+        print(f"Error updating application status: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/applications/<application_id>', methods=['DELETE'])
+def delete_application(application_id):
+    """Delete an application"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        # Archive the page in Notion (Notion doesn't allow true deletion)
+        notion_client.pages.update(
+            page_id=application_id,
+            archived=True
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'Application deleted successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error deleting application: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/test-database', methods=['GET'])
+def test_admin_database():
+    """Test database connection for admin"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        db_result = get_or_create_database()
+        if db_result['success']:
+            database = notion_client.databases.retrieve(database_id=db_result['database_id'])
+            return jsonify({
+                'success': True,
+                'database_id': db_result['database_id'][:8] + '...',
+                'database_title': database.get('title', [{}])[0].get('text', {}).get('content', 'Unknown'),
+                'message': 'Database connection successful'
+            })
+        else:
+            return jsonify(db_result)
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/admin/stats', methods=['GET'])
+def get_admin_stats():
+    """Get statistics for admin dashboard"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        db_result = get_or_create_database()
+        if not db_result['success']:
+            return jsonify(db_result)
+        
+        database_id = db_result['database_id']
+        
+        # Get all applications
+        response = notion_client.databases.query(database_id=database_id)
+        
+        total = len(response['results'])
+        approved = 0
+        pending = 0
+        rejected = 0
+        
+        for page in response['results']:
+            status = get_notion_select(page['properties'].get('Status', {})) or 'Pending Review'
+            if status == 'Approved':
+                approved += 1
+            elif status == 'Rejected':
+                rejected += 1
+            else:
+                pending += 1
+        
+        return jsonify({
+            'success': True,
+            'stats': {
+                'total': total,
+                'approved': approved,
+                'pending': pending,
+                'rejected': rejected
+            }
+        })
+        
+    except Exception as e:
+        print(f"Error fetching stats: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/admin/applications/<application_id>', methods=['GET'])
+def get_single_application(application_id):
+    """Get single application details for editing"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        # Get the specific page
+        page = notion_client.pages.retrieve(page_id=application_id)
+        props = page['properties']
+        
+        # Extract data safely
+        app_data = {
+            'id': page['id'],
+            'student_name': get_notion_text(props.get('Student Name', {})),
+            'email': get_notion_email(props.get('Email', {})),
+            'phone': get_notion_phone(props.get('Phone', {})),
+            'date_of_birth': get_notion_date(props.get('Date of Birth', {})),
+            'address': get_notion_text(props.get('Address', {})),
+            'guardian_name': get_notion_text(props.get('Guardian Name', {})),
+            'guardian_phone': get_notion_phone(props.get('Guardian Phone', {})),
+            'relation': get_notion_select(props.get('Relation', {})),
+            'room_number': get_notion_text(props.get('Room Number', {})),
+            'admission_date': get_notion_date(props.get('Admission Date', {})),
+            'stay_duration': get_notion_text(props.get('Stay Duration', {})),
+            'emergency_contact': get_notion_phone(props.get('Emergency Contact', {})),
+            'status': get_notion_select(props.get('Status', {})) or 'Pending Review',
+            'submission_date': get_notion_date(props.get('Submission Date', {})),
+            'application_id': get_notion_text(props.get('Application ID', {}))
+        }
+        
+        return jsonify({
+            'success': True,
+            'application': app_data
+        })
+        
+    except Exception as e:
+        print(f"Error fetching application: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/admin/applications/<application_id>', methods=['PUT'])
+def update_application(application_id):
+    """Update application data"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        data = request.get_json()
+        
+        # Build properties object for update
+        properties = {}
+        
+        if data.get('student_name'):
+            properties['Student Name'] = {'title': [{'text': {'content': data['student_name']}}]}
+        
+        if data.get('email'):
+            properties['Email'] = {'email': data['email']}
+        
+        if data.get('phone'):
+            properties['Phone'] = {'phone_number': data['phone']}
+        
+        if data.get('date_of_birth'):
+            properties['Date of Birth'] = {'date': {'start': data['date_of_birth']}}
+        
+        if data.get('address'):
+            properties['Address'] = {'rich_text': [{'text': {'content': data['address']}}]}
+        
+        if data.get('guardian_name'):
+            properties['Guardian Name'] = {'rich_text': [{'text': {'content': data['guardian_name']}}]}
+        
+        if data.get('guardian_phone'):
+            properties['Guardian Phone'] = {'phone_number': data['guardian_phone']}
+        
+        if data.get('relation'):
+            properties['Relation'] = {'select': {'name': data['relation']}}
+        
+        if data.get('room_number'):
+            properties['Room Number'] = {'rich_text': [{'text': {'content': data['room_number']}}]}
+        
+        if data.get('admission_date'):
+            properties['Admission Date'] = {'date': {'start': data['admission_date']}}
+        
+        if data.get('stay_duration'):
+            properties['Stay Duration'] = {'rich_text': [{'text': {'content': data['stay_duration']}}]}
+        
+        if data.get('emergency_contact'):
+            properties['Emergency Contact'] = {'phone_number': data['emergency_contact']}
+        
+        if data.get('status'):
+            properties['Status'] = {'select': {'name': data['status']}}
+        
+        # Update the page in Notion
+        notion_client.pages.update(
+            page_id=application_id,
+            properties=properties
+        )
+        
+        return jsonify({
+            'success': True,
+            'message': 'Application updated successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error updating application: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/export', methods=['POST'])
+def export_applications():
+    """Export applications to CSV"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        data = request.get_json()
+        export_format = data.get('format', 'csv')
+        filter_status = data.get('status_filter', '')
+        
+        db_result = get_or_create_database()
+        if not db_result['success']:
+            return jsonify(db_result)
+        
+        database_id = db_result['database_id']
+        
+        # Query database with optional status filter
+        query_filter = None
+        if filter_status:
+            query_filter = {
+                "property": "Status",
+                "select": {
+                    "equals": filter_status
+                }
+            }
+        
+        response = notion_client.databases.query(
+            database_id=database_id,
+            filter=query_filter,
+            sorts=[
+                {
+                    "property": "Submission Date",
+                    "direction": "descending"
+                }
+            ]
+        )
+        
+        applications = []
+        for page in response['results']:
+            try:
+                props = page['properties']
+                
+                app_data = {
+                    'Application ID': get_notion_text(props.get('Application ID', {})),
+                    'Student Name': get_notion_text(props.get('Student Name', {})),
+                    'Email': get_notion_email(props.get('Email', {})),
+                    'Phone': get_notion_phone(props.get('Phone', {})),
+                    'Date of Birth': get_notion_date(props.get('Date of Birth', {})),
+                    'Address': get_notion_text(props.get('Address', {})),
+                    'Guardian Name': get_notion_text(props.get('Guardian Name', {})),
+                    'Guardian Phone': get_notion_phone(props.get('Guardian Phone', {})),
+                    'Relation': get_notion_select(props.get('Relation', {})),
+                    'Room Number': get_notion_text(props.get('Room Number', {})),
+                    'Admission Date': get_notion_date(props.get('Admission Date', {})),
+                    'Stay Duration': get_notion_text(props.get('Stay Duration', {})),
+                    'Emergency Contact': get_notion_phone(props.get('Emergency Contact', {})),
+                    'Status': get_notion_select(props.get('Status', {})) or 'Pending Review',
+                    'Submission Date': get_notion_date(props.get('Submission Date', {}))
+                }
+                applications.append(app_data)
+            except Exception as e:
+                print(f"Error processing application for export: {e}")
+                continue
+        
+        if export_format == 'csv':
+            import csv
+            import io
+            
+            output = io.StringIO()
+            if applications:
+                writer = csv.DictWriter(output, fieldnames=applications[0].keys())
+                writer.writeheader()
+                writer.writerows(applications)
+            
+            response_data = {
+                'success': True,
+                'data': output.getvalue(),
+                'filename': f'applications_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.csv',
+                'content_type': 'text/csv'
+            }
+        else:  # JSON format
+            response_data = {
+                'success': True,
+                'data': applications,
+                'filename': f'applications_export_{datetime.now().strftime("%Y%m%d_%H%M%S")}.json',
+                'content_type': 'application/json'
+            }
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        print(f"Error exporting applications: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/admin/bulk-update', methods=['POST'])
+def bulk_update_applications():
+    """Bulk update application statuses"""
+    if not notion_client:
+        return jsonify({'success': False, 'error': 'Notion not configured'})
+    
+    try:
+        data = request.get_json()
+        application_ids = data.get('application_ids', [])
+        new_status = data.get('status')
+        
+        if not application_ids or not new_status:
+            return jsonify({'success': False, 'error': 'Application IDs and status are required'}), 400
+        
+        updated_count = 0
+        errors = []
+        
+        for app_id in application_ids:
+            try:
+                notion_client.pages.update(
+                    page_id=app_id,
+                    properties={
+                        "Status": {
+                            "select": {
+                                "name": new_status
+                            }
+                        }
+                    }
+                )
+                updated_count += 1
+            except Exception as e:
+                errors.append(f"Failed to update {app_id}: {str(e)}")
+        
+        return jsonify({
+            'success': True,
+            'updated_count': updated_count,
+            'total_count': len(application_ids),
+            'errors': errors
+        })
+        
+    except Exception as e:
+        print(f"Error in bulk update: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+def get_notion_text(prop):
+    """Extract text from Notion property"""
+    try:
+        if prop.get('type') == 'title':
+            return prop.get('title', [{}])[0].get('text', {}).get('content', '')
+        elif prop.get('type') == 'rich_text':
+            return prop.get('rich_text', [{}])[0].get('text', {}).get('content', '')
+        return ''
+    except (IndexError, KeyError):
+        return ''
+
+def get_notion_email(prop):
+    """Extract email from Notion property"""
+    try:
+        return prop.get('email', '')
+    except KeyError:
+        return ''
+
+def get_notion_phone(prop):
+    """Extract phone from Notion property"""
+    try:
+        return prop.get('phone_number', '')
+    except KeyError:
+        return ''
+
+def get_notion_date(prop):
+    """Extract date from Notion property"""
+    try:
+        date_obj = prop.get('date', {})
+        if date_obj:
+            return date_obj.get('start', '')
+        return ''
+    except KeyError:
+        return ''
+
+def get_notion_select(prop):
+    """Extract select value from Notion property"""
+    try:
+        select_obj = prop.get('select', {})
+        if select_obj:
+            return select_obj.get('name', '')
+        return ''
+    except KeyError:
+        return ''
 
 @app.route('/health', methods=['GET'])
 def health_check():
